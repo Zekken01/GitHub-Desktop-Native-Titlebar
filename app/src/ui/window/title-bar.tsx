@@ -1,7 +1,6 @@
 import * as React from 'react'
 import memoizeOne from 'memoize-one'
 import { WindowState } from '../../lib/window-state'
-import { WindowControls } from './window-controls'
 import { Octicon } from '../octicons/octicon'
 import * as octicons from '../octicons/octicons.generated'
 import { isMacOSBigSurOrLater, isMacOSTahoeOrLater } from '../../lib/get-os'
@@ -87,24 +86,13 @@ export class TitleBar extends React.Component<ITitleBarProps> {
   }
 
   public render() {
-    const inFullScreen = this.props.windowState === 'full-screen'
-    const isMaximized = this.props.windowState === 'maximized'
+    // Use native title bar on Windows; no custom state-derived controls needed
 
-    // No Windows controls when we're in full-screen mode.
-    const winControls = __WIN32__ && !inFullScreen ? <WindowControls /> : null
-
-    // On Windows it's not possible to resize a frameless window if the
-    // element that sits flush along the window edge has -webkit-app-region: drag.
-    // The menu bar buttons all have no-drag but the area between menu buttons and
-    // window controls need to disable dragging so we add a 3px tall element which
-    // disables drag while still letting users drag the app by the titlebar below
-    // those 3px.
-    const topResizeHandle =
-      __WIN32__ && !isMaximized ? <div className="resize-handle top" /> : null
-
-    // And a 3px wide element on the left hand side.
-    const leftResizeHandle =
-      __WIN32__ && !isMaximized ? <div className="resize-handle left" /> : null
+    // We now use the native Windows titlebar, so don't render custom
+    // Windows window controls or frameless resize handles here.
+    const winControls = null
+    const topResizeHandle = null
+    const leftResizeHandle = null
 
     const titleBarClass =
       this.props.titleBarStyle === 'light' ? 'light-title-bar' : ''

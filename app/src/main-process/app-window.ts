@@ -75,8 +75,12 @@ export class AppWindow {
 
     if (__DARWIN__) {
       windowOptions.titleBarStyle = 'hidden'
-    } else if (__WIN32__) {
-      windowOptions.frame = false
+    }
+
+    if (__WIN32__) {
+      // Keep the native titlebar but hide the native menu bar so our
+      // custom in-app menu (FILE EDIT VIEW ...) is used instead.
+      windowOptions.autoHideMenuBar = true
     } else if (__LINUX__) {
       windowOptions.icon = path.join(__dirname, 'static', 'icon-logo.png')
     }
