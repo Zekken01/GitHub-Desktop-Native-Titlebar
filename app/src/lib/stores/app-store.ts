@@ -188,6 +188,8 @@ import {
   getRemoteURL,
   getGlobalConfigPath,
   getFilesDiffText,
+  TerminalOutput,
+  HookProgress,
 } from '../git'
 import {
   installGlobalLFSFilters,
@@ -3333,34 +3335,15 @@ export class AppStore extends TypedBaseStore<IAppState> {
           let aborted = false
           return createCommit(repository, message, selectedFiles, {
             amend: context.amend,
-            onHookProgress: hookProgress => {
-              this.repositoryStateCache.update(repository, state => ({
-                ...state,
-                hookProgress,
-              }))
-              this.emitUpdate()
-            },
-            onHookFailure: (hookName, terminalOutput) =>
-              new Promise(resolve => {
-                this._showPopup({
-                  type: PopupType.HookFailed,
-                  hookName,
-                  terminalOutput,
-                  resolve: resolution => {
-                    if (resolution === 'abort') {
-                      aborted = true
-                    }
-                    resolve(resolution)
-                  },
-                })
-              }),
+            onHookProgress: this.onHookProgress(repository),
+            onHookFailure: this.onHookFailure(() => (aborted = true)),
             onTerminalOutputAvailable: subscribeToCommitOutput => {
               this.repositoryStateCache.update(repository, state => ({
                 ...state,
                 subscribeToCommitOutput,
               }))
             },
-            skipCommitHooks: state.skipCommitHooks,
+            noVerify: state.skipCommitHooks,
           }).catch(err => (aborted ? undefined : Promise.reject(err)))
         },
         { gitContext: { kind: 'commit' }, repository }
@@ -4788,20 +4771,7 @@ export class AppStore extends TypedBaseStore<IAppState> {
             branch.upstreamWithoutRemote,
             gitStore.tagsToPush,
             {
-              onHookFailure: (hookName, terminalOutput) =>
-                new Promise(resolve => {
-                  this._showPopup({
-                    type: PopupType.HookFailed,
-                    hookName,
-                    terminalOutput,
-                    resolve: resolution => {
-                      if (resolution === 'abort') {
-                        aborted = true
-                      }
-                      resolve(resolution)
-                    },
-                  })
-                }),
+              onHookFailure: this.onHookFailure(() => (aborted = true)),
               ...options,
             },
             progress => {
@@ -5029,18 +4999,37 @@ export class AppStore extends TypedBaseStore<IAppState> {
             this.statsStore.increment('pullWithDefaultSettingCount')
           }
 
-          const pullSucceeded = await gitStore.performFailableOperation(
-            async () => {
-              await pullRepo(repository, remote, progress => {
-                this.updatePushPullFetchProgress(repository, {
-                  ...progress,
-                  value: progress.value * pullWeight,
+          let aborted = false
+          const pullSucceeded = await gitStore
+            .performFailableOperation(
+              async () => {
+                await pullRepo(repository, remote, {
+                  progressCallback: progress => {
+                    this.updatePushPullFetchProgress(repository, {
+                      ...progress,
+                      value: progress.value * pullWeight,
+                    })
+                  },
+                  onHookFailure: (hookName, terminalOutput) =>
+                    new Promise(resolve => {
+                      this._showPopup({
+                        type: PopupType.HookFailed,
+                        hookName,
+                        terminalOutput,
+                        resolve: resolution => {
+                          if (resolution === 'abort') {
+                            aborted = true
+                          }
+                          resolve(resolution)
+                        },
+                      })
+                    }),
                 })
-              })
-              return true
-            },
-            { gitContext, retryAction }
-          )
+                return true
+              },
+              { gitContext, retryAction }
+            )
+            .catch(err => (aborted ? false : Promise.reject(err)))
 
           // If the pull failed we shouldn't try to update the remote HEAD
           // because there's a decent chance that it failed either because we
@@ -5715,6 +5704,30 @@ export class AppStore extends TypedBaseStore<IAppState> {
     return Promise.resolve()
   }
 
+  private onHookProgress = (respository: Repository) => {
+    return (hookProgress: HookProgress) => {
+      this.repositoryStateCache.update(respository, () => ({ hookProgress }))
+      this.emitUpdate()
+    }
+  }
+
+  private onHookFailure = (onAborted: () => void) => {
+    return (hookName: string, terminalOutput: TerminalOutput) =>
+      new Promise<'abort' | 'ignore'>(resolve => {
+        this._showPopup({
+          type: PopupType.HookFailed,
+          hookName,
+          terminalOutput,
+          resolve: resolution => {
+            if (resolution === 'abort') {
+              onAborted()
+            }
+            resolve(resolution)
+          },
+        })
+      })
+  }
+
   public async _mergeBranch(
     repository: Repository,
     sourceBranch: Branch,
@@ -5755,7 +5768,16 @@ export class AppStore extends TypedBaseStore<IAppState> {
       }
     }
 
-    const mergeResult = await gitStore.merge(sourceBranch, isSquash)
+    let aborted = false
+    const mergeResult = await gitStore.merge(sourceBranch, {
+      squash: isSquash,
+      onHookFailure: this.onHookFailure(() => (aborted = true)),
+    })
+
+    if (aborted) {
+      return this._refreshRepository(repository)
+    }
+
     const { tip } = gitStore
 
     if (mergeResult === MergeResult.Success && tip.kind === TipState.Valid) {
@@ -5850,12 +5872,9 @@ export class AppStore extends TypedBaseStore<IAppState> {
 
     const gitStore = this.gitStoreCache.get(repository)
     const result = await gitStore.performFailableOperation(() =>
-      continueRebase(
-        repository,
-        workingDirectory.files,
-        manualResolutions,
-        progressCallback
-      )
+      continueRebase(repository, workingDirectory.files, manualResolutions, {
+        progressCallback,
+      })
     )
 
     return result || RebaseResult.Error

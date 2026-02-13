@@ -15,16 +15,8 @@ import { isErrnoException } from '../errno-exception'
 import { withTrampolineEnv } from '../trampoline/trampoline-environment'
 import { kStringMaxLength } from 'buffer'
 import { withHooksEnv } from '../hooks/with-hooks-env'
-
-export const coerceToString = (
-  value: string | Buffer,
-  encoding: BufferEncoding = 'utf8'
-) => (Buffer.isBuffer(value) ? value.toString(encoding) : value)
-
-export const coerceToBuffer = (
-  value: string | Buffer,
-  encoding: BufferEncoding = 'utf8'
-) => (Buffer.isBuffer(value) ? value : Buffer.from(value, encoding))
+import { coerceToString } from './coerce-to-string'
+import { pushTerminalChunk } from './push-terminal-chunk'
 
 export const isMaxBufferExceededError = (
   error: unknown
@@ -43,25 +35,35 @@ export type TerminalOutputListener = (cb: (chunk: TerminalOutput) => void) => {
 
 export type TerminalOutputCallback = (subscribe: TerminalOutputListener) => void
 
-export type HookProgress =
+export type HookProgress = {
+  readonly hookName: string
+} & (
   | {
-      readonly hookName: string
-    } & (
-      | {
-          readonly status: 'started'
-          readonly abort: () => void
-        }
-      | {
-          readonly status: 'finished' | 'failed'
-        }
-    )
+      readonly status: 'started'
+      readonly abort: () => void
+    }
+  | {
+      readonly status: 'finished' | 'failed'
+    }
+)
+
+export type HookCallbackOptions = {
+  readonly onHookProgress?: (progress: HookProgress) => void
+  readonly onHookFailure?: (
+    hookName: string,
+    terminalOutput: TerminalOutput
+  ) => Promise<'abort' | 'ignore'>
+  readonly onTerminalOutputAvailable?: TerminalOutputCallback
+}
 
 /**
  * An extension of the execution options in dugite that
  * allows us to piggy-back our own configuration options in the
  * same object.
  */
-export interface IGitExecutionOptions extends DugiteExecutionOptions {
+export interface IGitExecutionOptions
+  extends HookCallbackOptions,
+    DugiteExecutionOptions {
   /**
    * The exit codes which indicate success to the
    * caller. Unexpected exit codes will be logged and an
@@ -85,13 +87,6 @@ export interface IGitExecutionOptions extends DugiteExecutionOptions {
   readonly isBackgroundTask?: boolean
 
   readonly interceptHooks?: string[]
-  readonly onHookProgress?: (progress: HookProgress) => void
-  readonly onHookFailure?: (
-    hookName: string,
-    terminalOutput: TerminalOutput
-  ) => Promise<'abort' | 'ignore'>
-
-  readonly onTerminalOutputAvailable?: TerminalOutputCallback
 }
 
 /**
@@ -249,46 +244,27 @@ export async function git(
   // this property is to provide "terminal-like" output to the user when a Git
   // command fails.
   const terminalChunks: string[] = []
-  let terminalOutputLength = 0
+  const terminalCapacity = 256 * 1024
 
   // Keep at most 256kb of combined stderr and stdout output. This is used
   // to provide more context in error messages.
   opts.processCallback = process => {
-    if (options?.onTerminalOutputAvailable) {
-      options.onTerminalOutputAvailable(function (cb) {
-        terminalChunks.forEach(chunk => cb(chunk))
+    options?.onTerminalOutputAvailable?.(function (cb) {
+      terminalChunks.forEach(chunk => cb(chunk))
 
-        process.stdout?.on('data', cb)
-        process.stderr?.on('data', cb)
+      process.stdout?.on('data', cb)
+      process.stderr?.on('data', cb)
 
-        return {
-          unsubscribe: () => {
-            process.stdout?.off('data', cb)
-            process.stderr?.off('data', cb)
-          },
-        }
-      })
-    }
-
-    const capacity = 256 * 1024
-    const push = (chunk: Buffer | string) => {
-      chunk = coerceToString(chunk)
-
-      terminalChunks.push(chunk)
-      terminalOutputLength += chunk.length
-
-      while (terminalOutputLength > capacity) {
-        const firstChunk = terminalChunks[0]
-        const overrun = terminalOutputLength - capacity
-
-        if (overrun >= firstChunk.length) {
-          terminalChunks.shift()
-          terminalOutputLength -= firstChunk.length
-        } else {
-          terminalChunks[0] = firstChunk.substring(overrun)
-          terminalOutputLength -= overrun
-        }
+      return {
+        unsubscribe: () => {
+          process.stdout?.off('data', cb)
+          process.stderr?.off('data', cb)
+        },
       }
+    })
+
+    const push = (chunk: Buffer | string) => {
+      pushTerminalChunk(terminalChunks, terminalCapacity, chunk)
     }
 
     process.stdout?.on('data', push)
